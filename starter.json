@@ -1,0 +1,20 @@
+{
+  "name": "Quick Draw",
+  "genre": "party",
+  "dim": "2D",
+  "mode": "Party",
+  "players": "2–8",
+  "hook": "Wait for DRAW! Tap first. Flinch and you foul.",
+  "how": "Everyone stands still while the tension builds. When the sign says DRAW!, tap: the first tap to reach the host wins the round. Tap too soon and you sit the round out. First to 5 wins.",
+  "controls": "Click, tap anywhere or press Space",
+  "uses": [
+    ["Host-run rounds", "One player's browser picks the moment and judges who drew first, in the order the taps reach it (its own tap gets there quickest); if it leaves, the next player takes over."],
+    ["Leaderboard", "Each player's fastest reaction, timed in their own browser."],
+    ["Bots", "Bot gunslingers draw at different speeds and sometimes flinch, until enough people join."]
+  ],
+  "ideas": [
+    "Make it a space duel with laser blasters and aliens",
+    "Add fake-out signs like DRAT! that you must not tap on",
+    "Make the last round worth double"
+  ]
+}

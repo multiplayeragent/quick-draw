@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quick Draw</title>
+<style>
+  :root { --ink: #fff8ec; --dim: #f3d9b8; --gold: #ffd23f; --red: #e8343f; --wood: #4a2a18; }
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #2a1408; }
+  body { color: var(--ink); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; cursor: pointer; }
+  [hidden] { display: none !important; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 1px 3px #000c; }
+  #round { top: max(8px, env(safe-area-inset-top)); left: 0; right: 0; text-align: center; font-weight: 800; font-size: 15px; }
+  #hint { top: calc(max(8px, env(safe-area-inset-top)) + 22px); left: 12px; right: 12px; text-align: center; font-weight: 700; font-size: 13px; color: var(--gold); }
+  #net { bottom: max(8px, env(safe-area-inset-bottom)); left: max(12px, env(safe-area-inset-left)); font-size: 12px; color: var(--dim); }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #2a1408a8; }
+  .card { box-sizing: border-box; width: min(380px, 92vw); max-height: 86vh; overflow: auto; padding: 18px 20px; border-radius: 16px; background: #fff3dd; color: #3a2010; text-align: center;
+          border: 4px solid #7a4422; box-shadow: 0 8px 0 #0006; }
+  .card h2 { margin: 0 0 8px; font-size: 26px; color: var(--red); letter-spacing: .02em; }
+  .card h3 { margin: 14px 0 4px; font-size: 14px; color: #a05a1c; text-align: left; }
+  .card ol { margin: 0; padding-left: 24px; font-size: 15px; text-align: left; }
+  .card li { padding: 2px 0; } .card li span { float: right; font-variant-numeric: tabular-nums; }
+  .card li.me { font-weight: 800; color: #b5490f; }
+  .card p { margin: 10px 0 0; font-size: 13px; opacity: .8; }
+  button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: var(--red); color: #fff; font: 800 17px system-ui, sans-serif; cursor: pointer; box-shadow: 0 4px 0 #7a1a20; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="round"></div>
+<div class="hud" id="hint"></div>
+<div class="hud" id="net">Connecting…</div>
+<div id="over" hidden><div class="card">
+  <h2 id="winner"></h2><ol id="standings"></ol>
+  <h3>Fastest draws</h3><ol id="board"><li>Loading…</li></ol>
+  <button class="go" id="again">Play again</button><p id="next"></p>
+</div></div>
+<script>
+/* ═══ QUICK DRAW · a Multiplayer Agent starter ═══════════════════════════════════════════
+ * Wait for "DRAW!", then tap first. Tap too soon and it's a foul. First to 5 wins.
+ * Party, 2–8 players; bots fill empty seats.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ points to win, the random wait, timers, bots
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   DUEL (HOST) ... the phases (ready, wait, draw, result, match), who drew first, fouls,
+ *                   scores, the bots. Only the host writes the shared `duel` field.
+ *   MY DRAW ....... your tap: a foul before DRAW!, a draw after it. Sent to the host.
+ *   SCENE ......... the desert, the gunslingers, the big sign, dust and flags
+ *   HUD & RESULTS . round line, hints, match card, leaderboard, sounds
+ *   INPUT ......... tap or click anywhere, or Space
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - The whole match lives in ONE shared field, `duel`: {id, v, n, phase, endsAt, waitAt,
+ *     drawAt, drawnAt, scores, taps, fouls, winner, bots}. Only the HOST writes it; `v` goes up on
+ *     every write.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s),
+ *     worked out every frame. It picks the random moment (drawAt), flips the round to
+ *     "draw" when its clock gets there, and judges who drew first: the order the taps
+ *     REACH THE HOST'S BROWSER. The host's own tap has no trip to make, so it gets a few
+ *     hundredths of a second of head start: this is a party game, not a stopwatch.
+ *   - Everyone else sends intents: "bang" {k, ms} (I drew in round k, my own reaction in ms)
+ *     and "foul" {k} (I tapped before I saw DRAW!). Your client decides foul or bang from what
+ *     IT showed you. The host applies its own taps directly (an intent never comes back).
+ *   - Each player writes its OWN entity: `n`/`c` (name, color), `hb` (heartbeat) and `rdy`
+ *     (Play again). The host runs the bots (their taps and the odd foul) inside `duel`.
+ *   - A new host adopts `duel` as it is: same round, same moment, same scores.
+ *   - ?attract plays offline with bots and an autopilot for you (the preview video).
+ *   - Leaderboard "fastest-draw": your quickest reaction, measured in your browser
+ *     (sent as 5000 - ms, so higher is better).
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  target: 5,            // round wins that take the match
+  seats: 4,             // bots fill the room up to this many gunslingers
+  readyMs: 1600,        // the "Round N" sign before the wait
+  waitMin: 1500,        // shortest wait before DRAW!, ms...
+  waitMax: 5000,        // ...and the longest (picked at random by the host each round)
+  drawWindow: 2500,     // ms to draw after DRAW! before the round is called "too slow"
+  collectMs: 700,       // after the first draw, ms the others still get a place
+  resultMs: 2600,       // ms the round result shows
+  matchMs: 10000,       // ms on the match card before the next match
+  botReact: [230, 430], // fastest and slowest bot reaction, ms
+  botFoul: 0.06,        // chance a bot jumps the gun in a round
+  board: "fastest-draw",
+};
+const BOT_NAMES = ["Tumbleweed", "Cactus Jo", "Rattler", "Buckshot", "Coyote", "Sundown", "Mesa Kid", "Dusty"];
+const COLORS = ["#e8343f", "#2f7fe0", "#f2b705", "#2fae5f", "#9b4fd8", "#ff7a2f", "#e05fae", "#1fb3a8"];
+const SKIN = ["#f6d0b1", "#f1c27d", "#e0ac69", "#c68642", "#a8693c", "#8d5524"];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'quick-draw',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A JSON field, parsed once per change (read-only: never mutate what this returns). */
+function cached(key, raw, fb) { const m = memo.get(key); if (m && m.raw === raw) return m.v; const v = parse(raw, fb); memo.set(key, { raw, v }); return v; }
+let net = null, S = { entities: { players: {} }, shared: {} }, netDown = false;
+const seenHb = new Map(); // sessionId -> { hb, at } on OUR clock
+/** Players whose heartbeat moved in the last 3s (plus us), sorted by sessionId. */
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+const humans = () => livePlayers(); // (in ?attract you play too, on autopilot)
+
+// ── DUEL (HOST) ─────────────────────────────────────────────────────────────────────
+const host = { last: null, wasHost: false, plan: new Map(), planFor: "" };
+/** The match as state has it, or the host's own newer write that hasn't come back yet. `v` only goes up. */
+function duel() {
+  const d = cached("duel", S.shared.duel, null);
+  return host.last && isHost() && (!d || host.last.v > d.v) ? host.last : d;
+}
+function writeDuel(d) { d = { ...d, v: (duel()?.v ?? 0) + 1 }; host.last = d; net.setShared("duel", JSON.stringify(d)); return d; }
+const keyOf = (d) => d.id + ":" + d.n; // one round of one match
+const rnd = (a, b) => a + Math.random() * (b - a);
+function newBots() {
+  const want = Math.max(0, CONFIG.seats - humans().length), names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
+  const taken = new Set([...Object.values(S.entities.players || {}).map((p) => p.c), myColor]), free = COLORS.filter((c) => !taken.has(c));
+  return Array.from({ length: want }, (_, i) => ({ i: "bot" + i, n: names[i], c: free[i % Math.max(1, free.length)] || COLORS[i] }));
+}
+const newMatch = (id) => ({ id, n: 1, phase: "ready", endsAt: Date.now() + CONFIG.readyMs, drawAt: 0, drawnAt: 0, scores: {}, taps: [], fouls: [], winner: "", bots: newBots() });
+const nextRound = (d, t) => ({ ...d, n: d.n + 1, phase: "ready", endsAt: t + CONFIG.readyMs, drawAt: 0, drawnAt: 0, taps: [], fouls: [], winner: "" });
+/** Everyone in this match who can still draw this round: live humans and the bots, minus fouls. */
+const shooters = (d) => [...humans(), ...d.bots.map((b) => b.i)];
+const contenders = (d) => shooters(d).filter((id) => !d.fouls.includes(id));
+const hasTapped = (d, id) => d.taps.some((x) => x[0] === id);
+
+/** A "bang" intent (or the host's own tap): the first one to arrive wins the round. */
+function applyTap(id, k, ms) {
+  const d = duel();
+  if (!d || d.phase !== "draw" || keyOf(d) !== k || hasTapped(d, id) || d.fouls.includes(id)) return;
+  const t = Date.now(), first = !d.winner;
+  writeDuel({ ...d, taps: [...d.taps, [id, t - d.drawnAt, Math.max(0, Math.min(9999, Math.round(+ms || 0)))]], winner: d.winner || id, endsAt: first ? Math.min(d.endsAt, t + CONFIG.collectMs) : d.endsAt });
+}
+/** A "foul" intent: that player tapped before its screen showed DRAW!, so it sits this round out. */
+function applyFoul(id, k) {
+  const d = duel();
+  if (!d || keyOf(d) !== k || !["ready", "wait", "draw"].includes(d.phase) || hasTapped(d, id) || d.fouls.includes(id)) return;
+  writeDuel({ ...d, fouls: [...d.fouls, id] });
+}
+/** Each round the host plans every bot: a reaction time, and now and then a foul during the wait. */
+function planBots(d) {
+  host.planFor = keyOf(d); host.plan.clear();
+  for (const b of d.bots) {
+    const [fast, slow] = CONFIG.botReact;
+    host.plan.set(b.i, { react: rnd(fast, slow) * (Math.random() < 0.15 ? 1.4 : 1), foulAfter: Math.random() < CONFIG.botFoul ? rnd(300, CONFIG.waitMin + 600) : -1 });
+  }
+}
+function botActs(d, t) {
+  for (const b of d.bots) {
+    const p = host.plan.get(b.i); if (!p) continue;
+    if (d.phase === "wait" && p.foulAfter >= 0 && t >= d.waitAt + p.foulAfter && t < d.drawAt) applyFoul(b.i, keyOf(d));
+    if (d.phase === "draw" && t >= d.drawnAt + p.react) applyTap(b.i, keyOf(d), p.react);
+  }
+}
+function endRound(d, t) {
+  const scores = { ...d.scores };
+  if (d.winner) scores[d.winner] = (scores[d.winner] || 0) + 1;
+  writeDuel({ ...d, phase: "result", endsAt: t + CONFIG.resultMs, scores });
+}
+
+function hostTick() {
+  if (!host.wasHost) { host.wasHost = true; host.planFor = ""; } // a new host plans the bots afresh; the round stays as it is
+  let d = duel();
+  const t = Date.now();
+  if (!d) d = writeDuel(newMatch(1));
+  if (host.planFor !== keyOf(d)) planBots(d);
+  if (d.phase === "ready") {
+    if (t >= d.endsAt) writeDuel({ ...d, phase: "wait", waitAt: t, drawAt: t + rnd(CONFIG.waitMin, CONFIG.waitMax) });
+  } else if (d.phase === "wait") {
+    botActs(d, t); d = duel();
+    if (!contenders(d).length) endRound(d, t); // everyone jumped the gun
+    else if (t >= d.drawAt) writeDuel({ ...d, phase: "draw", drawnAt: t, endsAt: t + CONFIG.drawWindow });
+  } else if (d.phase === "draw") {
+    botActs(d, t); d = duel();
+    if (t >= d.endsAt || contenders(d).every((id) => hasTapped(d, id))) endRound(d, t);
+  } else if (d.phase === "result") {
+    if (t < d.endsAt) return;
+    if (Math.max(0, ...Object.values(d.scores)) >= CONFIG.target) writeDuel({ ...d, phase: "match", endsAt: t + CONFIG.matchMs });
+    else writeDuel(nextRound(d, t));
+  } else if (d.phase === "match") {
+    const people = humans(), ready = people.length && people.every((id) => (id === net.sessionId ? me.ready : (S.entities.players[id] || {}).rdy) === d.id);
+    if (t >= d.endsAt || ready) writeDuel(newMatch(d.id + 1));
+  }
+}
+
+// ── MY DRAW ─────────────────────────────────────────────────────────────────────────
+let myName = "";
+try { myName = localStorage.getItem("mpa-name") || ""; } catch {}
+myName = myName || ["Dusty", "Lucky", "Quick", "Rusty", "Sunny", "Calamity"][Math.floor(Math.random() * 6)] + " " + ["Kid", "Jo", "Sam", "Rae", "Pete", "Belle"][Math.floor(Math.random() * 6)];
+let myColor = COLORS[0]; // picked on join: the first color nobody in the room has
+const me = { key: "", seenAt: 0, tapped: false, fouled: false, react: 0, best: 0, ready: 0, submitted: -1, autoAt: 0 };
+
+/** Your one action. Before DRAW! (as YOUR screen showed it) it's a foul; after it, a draw.
+ *  `at` = when the tap happened (the input event's timestamp), read before anything slow runs. */
+function act(at) {
+  if (!(at > 0 && at <= performance.now())) at = performance.now();
+  unlockAudio(); // the first call builds the sound engine, which can take a moment: the tap time is already stamped
+  const d = duel();
+  if (!d) return;
+  if (d.phase === "match") return void playAgain();
+  syncRound(d);
+  if (me.tapped || me.fouled || d.phase === "ready" || d.phase === "result") return;
+  const k = keyOf(d);
+  if (d.phase === "wait" || !me.seenAt) { // too soon: you hadn't seen DRAW! yet
+    me.fouled = true; sfx("foul"); shake(8); dust(meSpot(), 10);
+    if (isHost()) applyFoul(net.sessionId, k); else net.send("foul", { k });
+    return;
+  }
+  me.tapped = true; me.react = Math.max(0, Math.round(at - me.seenAt));
+  if (!me.best || me.react < me.best) me.best = me.react;
+  sfx("bang"); shake(5); dust(meSpot(), 14);
+  if (isHost()) applyTap(net.sessionId, k, me.react); else net.send("bang", { k, ms: me.react });
+}
+/** A new round: forget your last tap. */
+function syncRound(d) {
+  const k = keyOf(d);
+  if (me.key === k) return;
+  Object.assign(me, { key: k, seenAt: 0, tapped: false, fouled: false, react: 0, autoAt: 0 });
+}
+/** ?attract: your gunslinger draws by itself, a touch faster than the bots. */
+function autopilot(d, now) {
+  if (!ATTRACT || d.phase !== "draw" || !me.seenAt || me.tapped) return;
+  if (!me.autoAt) me.autoAt = me.seenAt + rnd(210, 360);
+  if (now >= me.autoAt) act();
+}
+
+// ── SCENE ───────────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const cv = $("game"), ctx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+function fit() { DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight; cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); backdrop = null; }
+addEventListener("resize", fit); addEventListener("orientationchange", fit);
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+const hash = (s) => { let h = 7; for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); };
+const horizon = () => H * 0.42;
+
+/** The desert (mesas, cacti, rocks), painted once per screen size. */
+let backdrop = null;
+function buildBackdrop() {
+  const c = document.createElement("canvas"); c.width = Math.round(W * DPR); c.height = Math.round(H * DPR);
+  const g = c.getContext("2d"), rand = mulberry32(11), hy = horizon();
+  g.scale(DPR, DPR);
+  const ground = g.createLinearGradient(0, hy, 0, H); ground.addColorStop(0, "#e9b779"); ground.addColorStop(1, "#c98a52");
+  g.fillStyle = ground; g.fillRect(0, hy, W, H - hy);
+  g.fillStyle = "#b8743f55"; // a dirt street running to the horizon
+  g.beginPath(); g.moveTo(W * 0.46, hy); g.lineTo(W * 0.54, hy); g.lineTo(W * 0.95, H); g.lineTo(W * 0.05, H); g.fill();
+  for (const [x0, w, h, col] of [[-0.05, 0.3, 0.13, "#a24a2a"], [0.22, 0.22, 0.08, "#b65a32"], [0.62, 0.32, 0.15, "#9a4226"], [0.88, 0.25, 0.09, "#b65a32"]]) { // mesas
+    g.fillStyle = col; g.beginPath(); g.moveTo(W * x0, hy); g.lineTo(W * (x0 + 0.04), hy - H * h); g.lineTo(W * (x0 + w - 0.04), hy - H * h); g.lineTo(W * (x0 + w), hy); g.fill();
+    g.fillStyle = "#00000022"; g.fillRect(W * (x0 + 0.04), hy - H * h, W * (w - 0.08), H * 0.012);
+  }
+  for (let i = 0; i < 40; i++) { const x = rand() * W, y = hy + 6 + rand() * (H - hy); g.fillStyle = "#8a5a3466"; g.beginPath(); g.ellipse(x, y, 3 + rand() * 6, 2 + rand() * 2, 0, 0, Math.PI * 2); g.fill(); } // pebbles
+  for (const [fx, fy, s] of [[0.06, 0.62, 1], [0.93, 0.7, 1.2], [0.17, 0.47, 0.5], [0.8, 0.46, 0.55]]) cactus(g, W * fx, H * fy, Math.min(W, H) * 0.0028 * s);
+  backdrop = c;
+}
+function cactus(g, x, y, k) {
+  g.save(); g.translate(x, y); g.scale(k, k); g.fillStyle = "#3f7a3a";
+  const stem = (x0, y0, w, h) => { g.beginPath(); g.roundRect ? g.roundRect(x0, y0, w, h, w / 2) : g.rect(x0, y0, w, h); g.fill(); };
+  stem(-6, -60, 12, 60); stem(-22, -42, 10, 22); stem(-22, -26, 18, 8); stem(12, -50, 10, 26); stem(4, -28, 18, 8);
+  g.fillStyle = "#00000022"; g.beginPath(); g.ellipse(0, 0, 18, 4, 0, 0, Math.PI * 2); g.fill(); g.restore();
+}
+
+/** Where everyone stands: you up front, the others in a row behind. */
+function layout(list) {
+  const others = list.filter((p) => !p.me), hy = horizon(), out = new Map();
+  const n = others.length, size = Math.min(H * 0.19, (W / (n + 1)) * 1.1, 130);
+  others.forEach((p, i) => out.set(p.id, { x: (W * (i + 1)) / (n + 1), y: hy + (H - hy) * (0.2 + (i % 2) * 0.05 * (n > 4)), s: size }));
+  const mine = list.find((p) => p.me);
+  if (mine) out.set(mine.id, { x: W / 2, y: H - Math.max(64, H * 0.09), s: Math.min(H * 0.22, 170) });
+  return out;
+}
+const meSpot = () => spots.get(net.sessionId) || { x: W / 2, y: H * 0.9, s: 100 };
+let spots = new Map();
+
+const parts = [];
+function dust(at, n) { for (let i = 0; i < n; i++) parts.push({ x: at.x + rnd(-20, 20), y: at.y - 4, vx: rnd(-60, 60), vy: rnd(-50, -10), life: rnd(0.4, 0.9), max: 0.9, r: rnd(4, 10), col: "#f3d9b8" }); }
+function confetti(at) { for (let i = 0; i < 40; i++) parts.push({ x: at.x, y: at.y - at.s, vx: rnd(-160, 160), vy: rnd(-260, -80), life: rnd(0.8, 1.6), max: 1.6, r: rnd(3, 5), col: COLORS[i % COLORS.length], g: 380 }); }
+let shakeAmt = 0, flash = 0;
+const shake = (n) => { shakeAmt = Math.max(shakeAmt, n); };
+const tumble = { x: -100, on: false };
+
+function drawScene(d, list, now, dt) {
+  if (!backdrop) buildBackdrop();
+  shakeAmt = Math.max(0, shakeAmt - dt * 30); flash = Math.max(0, flash - dt * 3);
+  const sx = (Math.random() - 0.5) * shakeAmt, sy = (Math.random() - 0.5) * shakeAmt, hy = horizon();
+  const drawing = d.phase === "draw", waiting = d.phase === "wait";
+  // the wait slowly pushes in; DRAW! snaps back
+  const zoom = waiting ? 1 + Math.min(0.05, Math.max(0, Date.now() - d.waitAt) / 80000) : 1;
+  ctx.setTransform(DPR * zoom, 0, 0, DPR * zoom, DPR * (sx + (W * (1 - zoom)) / 2), DPR * (sy + (H * (1 - zoom)) / 2));
+  const sky = ctx.createLinearGradient(0, 0, 0, hy);
+  if (drawing) { sky.addColorStop(0, "#9a0f1e"); sky.addColorStop(1, "#ff5a3c"); } else { sky.addColorStop(0, waiting ? "#e0662c" : "#f08a3c"); sky.addColorStop(1, "#ffe0a3"); }
+  ctx.fillStyle = sky; ctx.fillRect(-20, -20, W + 40, hy + 20);
+  ctx.fillStyle = drawing ? "#ffe0a3" : "#fff2c4"; ctx.beginPath(); ctx.arc(W * 0.5, hy - H * 0.02, Math.min(W, H) * 0.13, Math.PI, 0); ctx.fill(); // the sun on the horizon
+  ctx.drawImage(backdrop, 0, 0, W, H);
+  // a tumbleweed rolls through while everyone waits
+  if (waiting && !tumble.on) Object.assign(tumble, { on: true, x: -60, y: hy + (H - hy) * rnd(0.12, 0.2), sp: rnd(70, 120) });
+  if (tumble.on) {
+    tumble.x += tumble.sp * dt; if (tumble.x > W + 60) tumble.on = false;
+    const r = Math.min(W, H) * 0.03, bounce = Math.abs(Math.sin(tumble.x / 30)) * r * 0.8;
+    ctx.save(); ctx.translate(tumble.x, tumble.y - r - bounce); ctx.rotate(tumble.x / r);
+    ctx.strokeStyle = "#8a5a2c"; ctx.lineWidth = 2; for (let i = 0; i < 6; i++) { ctx.beginPath(); ctx.ellipse(0, 0, r, r * 0.55, (i * Math.PI) / 6, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.restore();
+  }
+  // gunslingers, back row first
+  spots = layout(list);
+  const sorted = [...list].sort((a, b) => spots.get(a.id).y - spots.get(b.id).y);
+  for (const p of sorted) drawSlinger(p, spots.get(p.id), d, now);
+  // dust and confetti
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i]; p.life -= dt; if (p.life <= 0) { parts.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += (p.g || 0) * dt;
+    ctx.globalAlpha = Math.min(1, p.life / p.max * 1.5); ctx.fillStyle = p.col; ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (p.g ? 1 : 1 + (1 - p.life / p.max)), 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  drawSign(d, list, now);
+  if (flash > 0) { ctx.setTransform(DPR, 0, 0, DPR, 0, 0); ctx.fillStyle = `rgba(255,255,255,${flash * 0.6})`; ctx.fillRect(0, 0, W, H); }
+}
+
+/** What one gunslinger is doing this round, from state (and, for you, your own tap a moment early). */
+function stanceOf(p, d) {
+  const tap = d.taps.findIndex((x) => x[0] === p.id), fouled = d.fouls.includes(p.id) || (p.me && me.fouled && me.key === keyOf(d));
+  const drew = tap >= 0 || (p.me && me.tapped && me.key === keyOf(d));
+  return { fouled, drew, place: tap, won: d.winner === p.id && (d.phase === "result" || d.phase === "draw"), at: tap >= 0 ? d.taps[tap][1] : 0, ms: tap >= 0 ? d.taps[tap][2] : 0 };
+}
+function drawSlinger(p, spot, d, now) {
+  const st = stanceOf(p, d), u = spot.s / 100, t = now / 1000;
+  const bob = st.won ? Math.abs(Math.sin(t * 8)) * 6 : d.phase === "wait" ? Math.sin(t * 2 + hash(p.id)) * 0.8 : 0;
+  ctx.save(); ctx.translate(spot.x, spot.y - bob * u); ctx.scale(u, u);
+  ctx.fillStyle = "#0003"; ctx.beginPath(); ctx.ellipse(0, bob, 30, 6, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#4a2e1c"; ctx.fillRect(-13, -30, 9, 30); ctx.fillRect(4, -30, 9, 30); // legs
+  ctx.fillStyle = "#2a1a10"; ctx.fillRect(-15, -6, 12, 6); ctx.fillRect(3, -6, 12, 6); // boots
+  ctx.fillStyle = "#6a3f22"; ctx.fillRect(-16, -34, 32, 5); // belt
+  ctx.fillStyle = "#c9a227"; ctx.fillRect(-3, -34, 6, 5);
+  ctx.fillStyle = "#3a2414"; ctx.fillRect(15, -36, 7, 14); // holster
+  // poncho with a zigzag
+  ctx.fillStyle = p.color; ctx.beginPath(); ctx.moveTo(-26, -30); ctx.lineTo(26, -30); ctx.lineTo(13, -68); ctx.lineTo(-13, -68); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "#fff8"; ctx.lineWidth = 3; ctx.beginPath();
+  for (let i = 0; i <= 8; i++) ctx.lineTo(-22 + i * 5.5, -40 + (i % 2) * 5); ctx.stroke();
+  // arms: at the sides while waiting, the right one up with a popgun once you draw
+  ctx.strokeStyle = SKIN[hash(p.id) % SKIN.length]; ctx.lineWidth = 7; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(-15, -60); ctx.lineTo(-22, -36); ctx.stroke();
+  if (st.drew) {
+    ctx.beginPath(); ctx.moveTo(15, -60); ctx.lineTo(34, -82); ctx.stroke();
+    ctx.fillStyle = "#555c66"; ctx.save(); ctx.translate(36, -86); ctx.rotate(-0.6);
+    ctx.fillRect(-4, -3, 22, 7); ctx.fillStyle = "#6a3f22"; ctx.fillRect(-4, 0, 7, 12); ctx.restore();
+    const pop = p.me && me.tapAt ? Math.min(1, (now - me.tapAt) / 120) : 1; // the BANG! flag springs out of the barrel
+    ctx.save(); ctx.translate(52, -98); ctx.scale(pop, pop);
+    ctx.strokeStyle = "#ddd"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(3, -18); ctx.stroke();
+    ctx.fillStyle = "#fff"; ctx.fillRect(2, -38, 50, 20); ctx.strokeStyle = "#e8343f"; ctx.lineWidth = 2; ctx.strokeRect(2, -38, 50, 20);
+    ctx.fillStyle = "#e8343f"; ctx.font = "900 14px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("BANG!", 27, -28);
+    ctx.restore();
+  } else { ctx.beginPath(); ctx.moveTo(15, -60); ctx.lineTo(20, -36); ctx.stroke(); }
+  ctx.lineCap = "butt";
+  // head and face
+  ctx.fillStyle = SKIN[hash(p.id) % SKIN.length]; ctx.beginPath(); ctx.arc(0, -80, 13, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#2a1a10";
+  if (st.fouled) { ctx.font = "900 9px system-ui"; ctx.textAlign = "center"; ctx.fillText("x  x", 0, -80); ctx.beginPath(); ctx.arc(0, -72, 3, 0, Math.PI * 2); ctx.fill(); }
+  else {
+    ctx.beginPath(); ctx.arc(-5, -81, 1.8, 0, Math.PI * 2); ctx.arc(5, -81, 1.8, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#2a1a10"; ctx.lineWidth = 1.6; ctx.beginPath();
+    if (st.won) ctx.arc(0, -75, 4, 0.1, Math.PI - 0.1); else { ctx.moveTo(-4, -73); ctx.lineTo(4, -73); }
+    ctx.stroke();
+    if (d.phase === "wait") { ctx.beginPath(); ctx.moveTo(-8, -86); ctx.lineTo(-2, -84); ctx.moveTo(8, -86); ctx.lineTo(2, -84); ctx.stroke(); } // squinting
+  }
+  // hat (it flies off on a foul)
+  ctx.save();
+  if (st.fouled) { ctx.translate(10, -22); ctx.rotate(0.5); }
+  ctx.fillStyle = "#6b3e1f"; ctx.beginPath(); ctx.ellipse(0, -90, 25, 5.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-12, -90); ctx.lineTo(-10, -106); ctx.quadraticCurveTo(0, -101, 10, -106); ctx.lineTo(12, -90); ctx.fill();
+  ctx.fillStyle = p.color; ctx.fillRect(-12, -95, 24, 4);
+  ctx.restore();
+  if (st.won) { star(0, -50, 9, "#ffd23f"); } // the sheriff's star goes to the round winner
+  ctx.restore();
+  // name, score stars and this round's tag, unscaled so they stay readable
+  const score = (d.scores || {})[p.id] || 0, fs = Math.max(11, Math.min(15, spot.s * 0.13));
+  ctx.font = `800 ${fs}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "top";
+  ctx.lineWidth = 3; ctx.strokeStyle = "#2a1408"; ctx.strokeText(p.name, spot.x, spot.y + 6); ctx.fillStyle = p.me ? "#ffd23f" : "#fff8ec"; ctx.fillText(p.name, spot.x, spot.y + 6);
+  for (let i = 0; i < CONFIG.target; i++) star(spot.x + (i - (CONFIG.target - 1) / 2) * fs * 1.1, spot.y + 12 + fs * 1.6, fs * 0.42, i < score ? "#ffd23f" : "#00000040");
+  const tag = st.fouled ? ["FOUL!", "#e8343f"] : st.won ? ["FIRST!", "#ffd23f"] : st.place > 0 ? [`+${((st.at - d.taps[0][1]) / 1000).toFixed(2)}s`, "#fff8ec"] : d.phase === "result" ? ["too slow", "#f3d9b8"] : null;
+  if (tag) {
+    ctx.font = `900 ${Math.round(fs * 1.4)}px system-ui, sans-serif`; ctx.textBaseline = "bottom";
+    const y = spot.y - spot.s * 1.12; ctx.lineWidth = 4; ctx.strokeText(tag[0], spot.x, y); ctx.fillStyle = tag[1]; ctx.fillText(tag[0], spot.x, y);
+  }
+}
+function star(x, y, r, col) {
+  ctx.fillStyle = col; ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + (i * Math.PI) / 5, rr = i % 2 ? r * 0.45 : r; ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
+  ctx.closePath(); ctx.fill();
+}
+
+/** The big wooden sign in the sky: the round, "Steady…", DRAW!, who won. */
+function drawSign(d, list, now) {
+  const cx = W / 2, cy = horizon() * 0.36, big = Math.min(W * 0.17, H * 0.17);
+  let text = "", sub = "", col = "#fff8ec", size = big * 0.6;
+  if (d.phase === "ready") { text = `Round ${d.n}`; sub = `First to ${CONFIG.target} wins`; }
+  else if (d.phase === "wait") { text = "Steady…"; sub = "Wait for it"; col = "#ffe9c4"; size = big * (0.55 + Math.sin(now / 180) * 0.02); }
+  else if (d.phase === "draw") { text = "DRAW!"; col = "#fff"; size = big * (1.05 + Math.max(0, 0.15 - (now - me.seenAt) / 1000)); }
+  else if (d.phase === "result") {
+    const w = list.find((p) => p.id === d.winner);
+    text = !d.winner ? (d.fouls.length && !d.taps.length ? "All fouls!" : "Too slow!") : w && w.me ? "You drew first!" : `${w ? w.name : "Someone"} drew first!`;
+    sub = d.winner && me.tapped && me.key === keyOf(d) ? `Your draw: ${(me.react / 1000).toFixed(3)}s` : !d.winner ? "Nobody scores" : "";
+    size = big * 0.42; col = w && w.me ? "#ffd23f" : "#fff8ec";
+  } else if (d.phase === "match") { text = "Match over"; size = big * 0.45; }
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = `900 ${Math.round(size)}px Georgia, "Times New Roman", serif`;
+  ctx.lineWidth = Math.max(4, size * 0.08); ctx.strokeStyle = d.phase === "draw" ? "#5a0a10" : "#4a2a18"; ctx.lineJoin = "round";
+  ctx.strokeText(text, cx, cy); ctx.fillStyle = col; ctx.fillText(text, cx, cy);
+  if (sub) { ctx.font = `800 ${Math.round(Math.max(14, big * 0.2))}px system-ui, sans-serif`; ctx.lineWidth = 4; ctx.strokeText(sub, cx, cy + size * 0.62 + 8); ctx.fillStyle = "#fff2c4"; ctx.fillText(sub, cx, cy + size * 0.62 + 8); }
+}
+
+// ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+/** Everyone in the match: humans from their entities, bots from the duel. */
+function roster(d) {
+  const out = [];
+  for (const id of livePlayers()) {
+    const p = S.entities.players[id] || {};
+    out.push({ id, name: id === net.sessionId ? myName : String(p.n || "Player"), color: id === net.sessionId ? myColor : p.c || "#ccc", me: id === net.sessionId });
+  }
+  for (const b of d.bots) out.push({ id: b.i, name: b.n, color: b.c, bot: true });
+  return out;
+}
+let board = null, boardFor = -1;
+function hud(d, list) {
+  const t = Date.now();
+  $("round").textContent = ATTRACT ? "" : d.phase === "match" ? "" : `Round ${d.n} · first to ${CONFIG.target}`;
+  const tap = matchMedia("(pointer: coarse)").matches ? "Tap anywhere" : "Click or press Space";
+  $("hint").textContent = ATTRACT ? "" : me.fouled && me.key === keyOf(d) && d.phase !== "result" ? "Foul! You sit this round out." : d.phase === "ready" || d.phase === "wait" ? `${tap} when it says DRAW! Not before.` : "";
+  if (ATTRACT) { $("net").textContent = ""; $("over").hidden = true; return; }
+  const n = livePlayers().length;
+  $("net").textContent = netDown ? "Reconnecting…" : net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the duel" : ""}`;
+  $("over").hidden = d.phase !== "match";
+  if (d.phase === "match") {
+    const ranked = list.map((p) => ({ ...p, s: d.scores[p.id] || 0 })).sort((a, b) => b.s - a.s);
+    $("winner").textContent = ranked[0] ? (ranked[0].me ? "You win the match!" : `${ranked[0].name} wins the match!`) : "Match over";
+    $("standings").innerHTML = ranked.map((p) => `<li class="${p.me ? "me" : ""}">${esc(p.name)}<span>${"★".repeat(p.s) || "0"}</span></li>`).join("");
+    $("again").textContent = me.ready === d.id ? "Waiting for the others…" : "Play again";
+    $("next").textContent = (me.best ? `Your best draw: ${(me.best / 1000).toFixed(3)}s. ` : "") + `Next match in ${Math.max(0, Math.ceil((d.endsAt - t) / 1000))}s`;
+    if (boardFor !== d.id) { boardFor = d.id; showBoard(); }
+  }
+}
+function showBoard() {
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading…</li>";
+  const best = me.best && me.best !== me.submitted ? me.best : 0;
+  me.submitted = me.best;
+  (best ? board.submit(Math.max(0, 5000 - best)).catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${((5000 - e.score) / 1000).toFixed(3)}s</span></li>`).join("") : "<li>No draws yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+function playAgain() { const d = duel(); if (d && d.phase === "match") { me.ready = d.id; net.me.set("rdy", d.id); $("again").textContent = "Waiting for the others…"; } }
+$("again").onclick = playAgain;
+
+// Sounds, made on the fly with WebAudio (no files).
+let audio = null, lastBeat = 0;
+function unlockAudio() { if (!audio && !ATTRACT) try { audio = new AudioContext(); } catch {} }
+function sfx(kind) {
+  if (!audio) return;
+  const t = audio.currentTime, tone = (type, f0, f1, at, len, vol) => {
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t + at); o.frequency.exponentialRampToValueAtTime(f1, t + at + len);
+    g.gain.setValueAtTime(vol, t + at); g.gain.exponentialRampToValueAtTime(0.001, t + at + len);
+    o.connect(g).connect(audio.destination); o.start(t + at); o.stop(t + at + len + 0.02);
+  };
+  if (kind === "beat") { tone("sine", 70, 40, 0, 0.14, 0.35); tone("sine", 60, 36, 0.16, 0.12, 0.25); }
+  if (kind === "draw") { tone("triangle", 1480, 1480, 0, 0.6, 0.3); tone("triangle", 2220, 2220, 0, 0.4, 0.15); }
+  if (kind === "bang") { tone("square", 900, 60, 0, 0.12, 0.25); tone("sawtooth", 300, 40, 0, 0.2, 0.15); }
+  if (kind === "foul") tone("square", 140, 90, 0, 0.45, 0.18);
+  if (kind === "win") { tone("triangle", 660, 660, 0, 0.12, 0.2); tone("triangle", 880, 880, 0.12, 0.12, 0.2); tone("triangle", 1320, 1320, 0.24, 0.3, 0.2); }
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+addEventListener("keydown", (e) => { if (e.repeat) return; if (e.key === " " || e.key === "Enter") { e.preventDefault(); act(e.timeStamp); } });
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); act(e.timeStamp); });
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0, seen = { key: "", phase: "" };
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be stamped before `last`
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  if (isHost()) hostTick(); else host.wasHost = false;
+  const d = duel();
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (d) {
+    syncRound(d);
+    if (d.phase === "draw" && !me.seenAt) { me.seenAt = now; flash = 1; shake(10); sfx("draw"); } // this is the frame you SEE it: your reaction starts here
+    if (seen.key + seen.phase !== keyOf(d) + d.phase) { // one-off effects as the phases change
+      seen = { key: keyOf(d), phase: d.phase };
+      if (d.phase === "result" && d.winner) { const at = spots.get(d.winner); if (at) confetti(at); if (d.winner === net.sessionId) sfx("win"); }
+    }
+    if (d.phase === "wait" && now - lastBeat > 750) { lastBeat = now; sfx("beat"); }
+    if (me.tapped && !me.tapAt) me.tapAt = now;
+    if (!me.tapped) me.tapAt = 0;
+    autopilot(d, now);
+    const list = roster(d);
+    drawScene(d, list, now, dt);
+    if (now - lastHud > 100) { lastHud = now; hud(d, list); }
+  } else { ctx.fillStyle = "#2a1408"; ctx.fillRect(0, 0, W, H); }
+  requestAnimationFrame(frame);
+}
+/** Two players picked the same color at once (the joiner's first state can be empty): the later sessionId picks again. */
+function fixColor() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId), bots = duel()?.bots || [];
+  if (!others.some(([id, p]) => p.c === myColor && id < net.sessionId) && !bots.some((b) => b.c === myColor)) return; // a bot in your color: you change
+  const taken = new Set([...others.map(([, p]) => p.c), ...bots.map((b) => b.c)]), free = COLORS.find((c) => !taken.has(c));
+  if (free) { myColor = free; net.me.set("c", free); }
+}
+
+(async function start() {
+  fit();
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.on("bang", (m, from) => { if (isHost() && m) applyTap(from, m.k, m.ms); });
+  net.on("foul", (m, from) => { if (isHost() && m) applyFoul(from, m.k); });
+  net.onDisconnect(() => { netDown = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { netDown = false; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...(duel()?.bots || []).map((b) => b.c)]);
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  if (ATTRACT) Object.assign(CONFIG, { seats: 6, readyMs: 700, waitMin: 900, waitMax: 1500, resultMs: 1500, collectMs: 450, botFoul: 0.12, botReact: [220, 380] });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
