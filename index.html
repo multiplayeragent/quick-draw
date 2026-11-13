@@ -22,6 +22,7 @@
   .card ol { margin: 0; padding-left: 24px; font-size: 15px; text-align: left; }
   .card li { padding: 2px 0; } .card li span { float: right; font-variant-numeric: tabular-nums; }
   .card li.me { font-weight: 800; color: #b5490f; }
+  .card li.note { list-style: none; margin-left: -18px; opacity: .8; }
   .card p { margin: 10px 0 0; font-size: 13px; opacity: .8; }
   button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: var(--red); color: #fff; font: 800 17px system-ui, sans-serif; cursor: pointer; box-shadow: 0 4px 0 #7a1a20; }
 </style>
@@ -34,7 +35,7 @@
 <div class="hud" id="net">Connecting…</div>
 <div id="over" hidden><div class="card">
   <h2 id="winner"></h2><ol id="standings"></ol>
-  <h3>Fastest draws</h3><ol id="board"><li>Loading…</li></ol>
+  <h3>Fastest draws</h3><ol id="board"><li class="note">Loading…</li></ol>
   <button class="go" id="again">Play again</button><p id="next"></p>
 </div></div>
 <script>
@@ -308,7 +309,9 @@ function cactus(g, x, y, k) {
 function layout(list) {
   const others = list.filter((p) => !p.me), hy = horizon(), out = new Map();
   const n = others.length, size = Math.min(H * 0.19, (W / (n + 1)) * 1.1, 130);
-  others.forEach((p, i) => out.set(p.id, { x: (W * (i + 1)) / (n + 1), y: hy + (H - hy) * (0.2 + (i % 2) * 0.05 * (n > 4)), s: size }));
+  // more than 4: every other one steps back a row; on a narrow screen by a whole name and star line, so they don't overlap
+  const lift = n <= 4 ? 0 : W / (n + 1) < 90 ? Math.max(11, Math.min(15, size * 0.13)) * 3.4 : (H - hy) * 0.05;
+  others.forEach((p, i) => out.set(p.id, { x: (W * (i + 1)) / (n + 1), y: hy + (H - hy) * 0.2 + (i % 2) * lift, s: size }));
   const mine = list.find((p) => p.me);
   if (mine) out.set(mine.id, { x: W / 2, y: H - Math.max(64, H * 0.09), s: Math.min(H * 0.22, 170) });
   return out;
@@ -449,8 +452,9 @@ function drawSign(d, list, now) {
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.font = `900 ${Math.round(size)}px Georgia, "Times New Roman", serif`;
   ctx.lineWidth = Math.max(4, size * 0.08); ctx.strokeStyle = d.phase === "draw" ? "#5a0a10" : "#4a2a18"; ctx.lineJoin = "round";
-  ctx.strokeText(text, cx, cy); ctx.fillStyle = col; ctx.fillText(text, cx, cy);
-  if (sub) { ctx.font = `800 ${Math.round(Math.max(14, big * 0.2))}px system-ui, sans-serif`; ctx.lineWidth = 4; ctx.strokeText(sub, cx, cy + size * 0.62 + 8); ctx.fillStyle = "#fff2c4"; ctx.fillText(sub, cx, cy + size * 0.62 + 8); }
+  const maxW = W - 24; // a long name never runs off a phone
+  ctx.strokeText(text, cx, cy, maxW); ctx.fillStyle = col; ctx.fillText(text, cx, cy, maxW);
+  if (sub) { ctx.font = `800 ${Math.round(Math.max(14, big * 0.2))}px system-ui, sans-serif`; ctx.lineWidth = 4; ctx.strokeText(sub, cx, cy + size * 0.62 + 8, maxW); ctx.fillStyle = "#fff2c4"; ctx.fillText(sub, cx, cy + size * 0.62 + 8, maxW); }
 }
 
 // ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
@@ -486,13 +490,13 @@ function hud(d, list) {
 }
 function showBoard() {
   const list = $("board");
-  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
-  list.innerHTML = "<li>Loading…</li>";
+  if (!board) { list.innerHTML = '<li class="note">Leaderboards need a connection.</li>'; return; } // status lines are not numbered entries
+  list.innerHTML = '<li class="note">Loading…</li>';
   const best = me.best && me.best !== me.submitted ? me.best : 0;
   me.submitted = me.best;
   (best ? board.submit(Math.max(0, 5000 - best)).catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
-    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${((5000 - e.score) / 1000).toFixed(3)}s</span></li>`).join("") : "<li>No draws yet. Be the first.</li>";
-  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${((5000 - e.score) / 1000).toFixed(3)}s</span></li>`).join("") : '<li class="note">No draws yet. Be the first.</li>';
+  }).catch(() => { list.innerHTML = '<li class="note">Couldn\'t load the leaderboard.</li>'; });
 }
 function playAgain() { const d = duel(); if (d && d.phase === "match") { me.ready = d.id; net.me.set("rdy", d.id); $("again").textContent = "Waiting for the others…"; } }
 $("again").onclick = playAgain;
@@ -517,7 +521,8 @@ function sfx(kind) {
 
 // ── INPUT ───────────────────────────────────────────────────────────────────────────
 addEventListener("keydown", (e) => { if (e.repeat) return; if (e.key === " " || e.key === "Enter") { e.preventDefault(); act(e.timeStamp); } });
-cv.addEventListener("pointerdown", (e) => { e.preventDefault(); act(e.timeStamp); });
+cv.addEventListener("pointerdown", (e) => { e.preventDefault(); if (e.button === 0) act(e.timeStamp); }); // main button / touch only
+cv.addEventListener("contextmenu", (e) => e.preventDefault());
 document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
 
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
@@ -568,7 +573,7 @@ function fixColor() {
   const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...(duel()?.bots || []).map((b) => b.c)]);
   myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
   net.me.set({ n: myName, c: myColor, hb: Date.now() });
-  if (ATTRACT) Object.assign(CONFIG, { seats: 6, readyMs: 700, waitMin: 900, waitMax: 1500, resultMs: 1500, collectMs: 450, botFoul: 0.12, botReact: [220, 380] });
+  if (ATTRACT) Object.assign(CONFIG, { seats: 6, readyMs: 700, waitMin: 900, waitMax: 1500, resultMs: 1500, matchMs: 2500, collectMs: 450, botFoul: 0.12, botReact: [220, 380] });
   requestAnimationFrame(frame);
 })();
 </script>
