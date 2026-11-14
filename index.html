@@ -6,7 +6,7 @@
 <title>Quick Draw</title>
 <style>
   :root { --ink: #fff8ec; --dim: #f3d9b8; --gold: #ffd23f; --red: #e8343f; --wood: #4a2a18; }
-  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #2a1408; }
+  html, body { -webkit-tap-highlight-color: transparent; /* no blue flash on every tap */ margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #2a1408; }
   body { color: var(--ink); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; user-select: none; -webkit-user-select: none; }
   canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; cursor: pointer; }
   [hidden] { display: none !important; }
